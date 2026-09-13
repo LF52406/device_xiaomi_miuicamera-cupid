@@ -6,3 +6,14 @@
 
 soong_namespace {
 }
+
+python_binary_host {
+    name: "miuicamera-patch-apk",
+    main: "tools/patch_camera_apk.py",
+    srcs: ["tools/patch_camera_apk.py"],
+}
+
+filegroup {
+    name: "miuicamera-logical-display-patch",
+    srcs: ["display-patches/0001-Use-live-logical-display-metrics.patch"],
+}
