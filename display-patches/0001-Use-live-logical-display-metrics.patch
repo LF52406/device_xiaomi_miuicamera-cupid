@@ -1,0 +1,359 @@
+From: LF5 <lf524prod24061993@gmail.com>
+Subject: [PATCH] MiuiCamera: use live logical display metrics on AOSP
+
+Camera 5.3.001510.1 keeps app bounds in preferences and keys their validity
+only to persist.sys.miui_resolution. WindowManager logical size changes
+leave that MIUI property unchanged, reusing 1440x3200 bounds in a 1080x2400
+window even after a cold start.
+
+Read current WindowMetrics instead. Include density in the in-memory layout
+cache check and invalidate cached system bar dimensions before rebuilding.
+MiuiX AutoDensity must also obtain its logical size from DisplayMetrics,
+keeping the physical supported-mode size for the panel-inch calculation.
+
+No camera stream sizes, native libraries, resources, or sensor settings change.
+
+--- a/smali/y2/b.smali
++++ b/smali/y2/b.smali
+@@ -2667,157 +2667,39 @@
+     goto/16 :goto_6
+
+     :cond_8
+-    invoke-static {}, Lg2/b;->h()Ll2/g;
+-
+-    move-result-object v3
+-
+-    const-string v8, "app_bound_wide"
+-
+-    invoke-virtual {v3, v8, v2}, Lcom/android/camera/data/data/g;->getInt(Ljava/lang/String;I)I
+-
+-    move-result v9
+-
+-    const-string v10, "app_bound_thin"
+-
+-    invoke-virtual {v3, v10, v2}, Lcom/android/camera/data/data/g;->getInt(Ljava/lang/String;I)I
+-
+-    move-result v11
+-
+-    const-string v12, "miui_resolution"
+-
+-    const-string v13, ""
+-
+-    invoke-virtual {v3, v12, v13}, Lcom/android/camera/data/data/g;->getString(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+-
+-    move-result-object v14
+-
+-    const-string v15, "device_name"
+-
+-    invoke-virtual {v3, v15, v13}, Lcom/android/camera/data/data/g;->getString(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+-
+-    move-result-object v13
+-
+-    const-string v16, "persist.sys.miui_resolution"
+-
+-    invoke-static/range {v16 .. v16}, Lhg/f;->a(Ljava/lang/String;)Ljava/lang/String;
+-
+-    move-result-object v4
+-
+-    sget-object v5, Ljd/c;->a:Ljava/lang/String;
+-
+-    invoke-static {v14, v4}, Landroid/text/TextUtils;->equals(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Z
+-
+-    move-result v14
+-
+-    if-eqz v14, :cond_9
+-
+-    invoke-static {v5}, Landroid/text/TextUtils;->isEmpty(Ljava/lang/CharSequence;)Z
+-
+-    move-result v14
+-
+-    if-nez v14, :cond_9
+-
+-    invoke-static {v13, v5}, Landroid/text/TextUtils;->equals(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Z
+-
+-    move-result v13
+-
+-    if-eqz v13, :cond_9
+-
+-    const/4 v13, 0x1
+-
+-    goto :goto_4
+-
+-    :cond_9
+-    move v13, v2
+-
+-    :goto_4
+-    if-eqz v9, :cond_a
+-
+-    if-eqz v11, :cond_a
+-
+-    if-eqz v13, :cond_a
+-
+-    invoke-static {}, Ly2/b;->w0()Z
+-
+-    move-result v13
+-
+-    if-nez v13, :cond_a
+-
+-    move v6, v9
+-
+-    move v3, v11
+-
+-    goto :goto_6
+-
+-    :cond_a
++    # Persisted MIUI app bounds are not invalidated by AOSP logical size changes.
++    # Always use the current window, including after process death or rollback.
+     invoke-virtual {v0, v6}, Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;
+
+     move-result-object v6
+
+     check-cast v6, Landroid/view/WindowManager;
+
+-    invoke-static {v6}, Landroidx/window/layout/b;->a(Landroid/view/WindowManager;)Landroid/view/WindowMetrics;
++    invoke-interface {v6}, Landroid/view/WindowManager;->getCurrentWindowMetrics()Landroid/view/WindowMetrics;
+
+     move-result-object v6
+
+-    invoke-static {v6}, Landroidx/window/embedding/g;->a(Landroid/view/WindowMetrics;)Landroid/graphics/Rect;
++    invoke-virtual {v6}, Landroid/view/WindowMetrics;->getBounds()Landroid/graphics/Rect;
+
+     move-result-object v6
+
++    invoke-virtual {v6}, Landroid/graphics/Rect;->width()I
++
++    move-result v3
++
+     invoke-virtual {v6}, Landroid/graphics/Rect;->height()I
+
+-    move-result v9
+-
+-    invoke-virtual {v6}, Landroid/graphics/Rect;->width()I
+-
+-    move-result v11
+-
+-    invoke-static {v9, v11}, Ljava/lang/Math;->max(II)I
+-
+-    move-result v9
+-
+-    invoke-virtual {v6}, Landroid/graphics/Rect;->height()I
+-
+-    move-result v11
+-
+-    invoke-virtual {v6}, Landroid/graphics/Rect;->width()I
+-
+     move-result v6
+
+-    invoke-static {v11, v6}, Ljava/lang/Math;->min(II)I
++    invoke-static {v3, v6}, Ljava/lang/Math;->min(II)I
++
++    move-result v4
++
++    invoke-static {v3, v6}, Ljava/lang/Math;->max(II)I
+
+     move-result v6
+
+-    invoke-virtual {v3}, Lcom/android/camera/data/data/g;->b()Lr2/a$a;
+-
+-    move-result-object v3
+-
+-    invoke-interface {v3, v8, v9}, Lr2/a$a;->putInt(Ljava/lang/String;I)Lr2/a$a;
+-
+-    invoke-interface {v3, v10, v6}, Lr2/a$a;->putInt(Ljava/lang/String;I)Lr2/a$a;
+-
+-    invoke-interface {v3, v12, v4}, Lr2/a$a;->putString(Ljava/lang/String;Ljava/lang/String;)Lr2/a$a;
+-
+-    invoke-interface {v3, v15, v5}, Lr2/a$a;->putString(Ljava/lang/String;Ljava/lang/String;)Lr2/a$a;
+-
+-    :try_start_0
+-    invoke-interface {v3}, Lr2/a$a;->apply()V
+-    :try_end_0
+-    .catch Ljava/lang/Exception; {:try_start_0 .. :try_end_0} :catch_0
+-
+-    goto :goto_5
+-
+-    :catch_0
+-    const-string/jumbo v3, "the first time launch this process"
+-
+-    new-array v4, v2, [Ljava/lang/Object;
+-
+-    invoke-static {v1, v3, v4}, Lcom/android/camera/log/Log;->w(Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)V
+-
+-    :goto_5
+-    move v3, v6
+-
+-    move v6, v9
++    move v3, v4
+
+     :goto_6
+     sget-boolean v4, Ly2/b;->G:Z
+@@ -2843,6 +2725,15 @@
+     move-result v3
+
+     :cond_b
++    # Size and density can arrive in separate configuration updates.
++    iget v4, v7, Landroid/util/DisplayMetrics;->density:F
++
++    sget v5, Ly2/b;->w:F
++
++    cmpl-float v4, v4, v5
++
++    if-nez v4, :cond_c
++
+     sget-object v4, Ly2/b;->s:Ly2/c;
+
+     if-eqz v4, :cond_c
+@@ -2918,6 +2809,9 @@
+     return-void
+
+     :cond_c
++    # Cached status/navigation bar dimensions also depend on density.
++    invoke-static {}, Ly2/b;->Q0()V
++
+     iget v4, v7, Landroid/util/DisplayMetrics;->density:F
+
+     sput v4, Ly2/b;->w:F
+--- a/smali_classes5/miuix/autodensity/f.smali
++++ b/smali_classes5/miuix/autodensity/f.smali
+@@ -1286,97 +1286,58 @@
+
+     iput v2, p0, Lmiuix/autodensity/f;->e:F
+
++    # DisplayMetrics contains the current logical size on AOSP. The native
++    # supported modes stay unchanged when WindowManager forces a smaller size.
++    iget v2, p3, Landroid/util/DisplayMetrics;->widthPixels:I
++
++    iget v4, p3, Landroid/util/DisplayMetrics;->heightPixels:I
++
++    invoke-static {v2, v4}, Ljava/lang/Math;->min(II)I
++
++    move-result v5
++
++    invoke-static {v2, v4}, Ljava/lang/Math;->max(II)I
++
++    move-result v4
++
+     iget-object v2, p0, Lmiuix/autodensity/f;->m:Landroid/graphics/Point;
+
+-    iget-object v3, p0, Lmiuix/autodensity/f;->l:Landroid/graphics/Point;
+-
+-    iget v4, v3, Landroid/graphics/Point;->x:I
+-
+-    iget v3, v3, Landroid/graphics/Point;->y:I
+-
+-    invoke-virtual {v2, v4, v3}, Landroid/graphics/Point;->set(II)V
+-
+-    invoke-static {}, Lmiuix/autodensity/h;->k()Z
++    invoke-virtual {v2, v5, v4}, Landroid/graphics/Point;->set(II)V
++
++    # Keep the native dimensions for the physical-inch calculation. Scale only
++    # the default logical DPI; the user's forced DPI is read separately below.
++    iget-object v2, p0, Lmiuix/autodensity/f;->l:Landroid/graphics/Point;
++
++    iget v4, v2, Landroid/graphics/Point;->x:I
++
++    iget v2, v2, Landroid/graphics/Point;->y:I
++
++    invoke-static {v2, v4}, Ljava/lang/Math;->min(II)I
+
+     move-result v2
+
+     const/4 v3, 0x1
+
+-    if-eqz v2, :cond_2
+-
+-    const-string v2, "persist.sys.miui_resolution"
+-
+-    const/4 v4, 0x0
+-
+-    invoke-static {v2, v4}, Lmiuix/core/util/SystemProperties;->get(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+-
+-    move-result-object v2
+-
+-    new-instance v4, Ljava/lang/StringBuilder;
+-
+-    invoke-direct {v4}, Ljava/lang/StringBuilder;-><init>()V
+-
+-    const-string v5, "screenResolution: "
+-
+-    invoke-virtual {v4, v5}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+-
+-    invoke-virtual {v4, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+-
+-    invoke-virtual {v4}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+-
+-    move-result-object v4
+-
+-    invoke-static {v4}, Lmiuix/autodensity/d;->d(Ljava/lang/String;)V
+-
+-    invoke-static {v2}, Landroid/text/TextUtils;->isEmpty(Ljava/lang/CharSequence;)Z
+-
+-    move-result v4
+-
+-    if-nez v4, :cond_1
+-
+-    const-string v4, ","
+-
+-    invoke-virtual {v2, v4}, Ljava/lang/String;->split(Ljava/lang/String;)[Ljava/lang/String;
+-
+-    move-result-object v2
+-
+-    const/4 v4, 0x0
+-
+-    aget-object v4, v2, v4
+-
+-    invoke-static {v4}, Ljava/lang/Integer;->parseInt(Ljava/lang/String;)I
+-
+-    move-result v4
+-
+-    aget-object v2, v2, v3
+-
+-    invoke-static {v2}, Ljava/lang/Integer;->parseInt(Ljava/lang/String;)I
+-
+-    move-result v2
+-
+-    iget-object v5, p0, Lmiuix/autodensity/f;->m:Landroid/graphics/Point;
+-
+-    invoke-virtual {v5, v4, v2}, Landroid/graphics/Point;->set(II)V
+-
+-    :cond_1
+-    iget-object v2, p0, Lmiuix/autodensity/f;->m:Landroid/graphics/Point;
+-
+-    iget v4, v2, Landroid/graphics/Point;->y:I
+-
+-    iget-object v5, p0, Lmiuix/autodensity/f;->l:Landroid/graphics/Point;
+-
+-    iget v6, v5, Landroid/graphics/Point;->y:I
+-
+-    if-eq v4, v6, :cond_2
+-
+-    iget v2, v2, Landroid/graphics/Point;->x:I
+-
+-    mul-int/2addr p2, v2
+-
+-    iget v2, v5, Landroid/graphics/Point;->x:I
+-
+-    div-int/2addr p2, v2
++    if-lez v2, :cond_2
++
++    if-lez v5, :cond_2
++
++    if-eq v2, v5, :cond_2
++
++    int-to-float p2, p2
++
++    int-to-float v4, v5
++
++    mul-float/2addr p2, v4
++
++    int-to-float v2, v2
++
++    div-float/2addr p2, v2
++
++    invoke-static {p2}, Ljava/lang/Math;->round(F)I
++
++    move-result p2
+
+     iput p2, p0, Lmiuix/autodensity/f;->c:I
+
+     :cond_2
