@@ -2,10 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import hashlib
 from pathlib import Path
+import struct
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
+import zlib
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -14,6 +18,121 @@ PATCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PATCHER)
 PATCH = Path(__file__).resolve().parents[1] / "display-patches" / (
     "0001-Use-live-logical-display-metrics.patch")
+
+
+def dex_fixture(version=39, header_size=112):
+    """An empty standalone DEX with a header and a two-entry map list."""
+    data = bytearray(header_size)
+    data[:8] = f"dex\n{version:03d}\0".encode("ascii")
+    data += struct.pack("<IHHIIHHII", 2, 0, 0, 1, 0, 0x1000, 0, 1, header_size)
+    struct.pack_into("<III", data, 32, len(data), header_size, 0x12345678)
+    struct.pack_into("<I", data, 52, header_size)
+    struct.pack_into("<II", data, 104, len(data) - header_size, header_size)
+    if header_size == 120:
+        struct.pack_into("<II", data, 112, len(data), 0)
+    data[12:32] = hashlib.sha1(data[32:]).digest()
+    struct.pack_into("<I", data, 8, zlib.adler32(data[12:]))
+    return bytes(data)
+
+
+class DexFormatTest(unittest.TestCase):
+    def test_supported_standalone_formats(self):
+        for version in (35, 37, 38, 39, 40):
+            with self.subTest(version=version):
+                self.assertEqual(PATCHER.validate_dex(
+                    dex_fixture(version), "classes.dex"), version)
+
+    def test_reported_041_with_112_byte_header_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "041 header size is 112, expected 120"):
+            PATCHER.validate_dex(dex_fixture(41), "classes.dex")
+
+    def test_container_format_requires_separate_support(self):
+        with self.assertRaisesRegex(ValueError, "unsupported DEX version 041"):
+            PATCHER.validate_dex(dex_fixture(41, 120), "classes.dex")
+
+    def test_tool_must_preserve_original_dex_version(self):
+        with self.assertRaisesRegex(ValueError, "changed from 039 to 040"):
+            PATCHER.validate_dex(dex_fixture(40), "classes.dex", 39)
+
+    def test_corrupt_envelopes_are_rejected(self):
+        original = dex_fixture()
+        cases = {
+            "truncated DEX header": original[:100],
+            "invalid DEX magic": b"bad!" + original[4:],
+            "DEX file size": original + b"extra",
+            "DEX SHA-1": original[:-1] + bytes([original[-1] ^ 1]),
+            "DEX Adler-32": original[:8] + bytes([original[8] ^ 1]) + original[9:],
+        }
+        for error, data in cases.items():
+            with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
+                PATCHER.validate_dex(data, "classes.dex")
+
+    def test_unmodified_secondary_dex_is_also_checked(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "input.apk"
+            with zipfile.ZipFile(path, "w") as apk:
+                apk.writestr("classes.dex", dex_fixture())
+                apk.writestr("classes7.dex", dex_fixture(41))
+            with zipfile.ZipFile(path) as apk, self.assertRaisesRegex(
+                    ValueError, "classes7.dex: DEX 041"):
+                PATCHER.validate_apk_dex(apk)
+
+    def test_missing_secondary_dex_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "output.apk"
+            with zipfile.ZipFile(path, "w") as apk:
+                apk.writestr("classes.dex", dex_fixture())
+            with zipfile.ZipFile(path) as apk, self.assertRaisesRegex(
+                    ValueError, "changed its DEX entries"):
+                PATCHER.validate_apk_dex(apk, {"classes.dex": 39, "classes5.dex": 39})
+
+    def test_bad_assembler_output_never_replaces_previous_apk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, output = root / "input.apk", root / "output.apk"
+            with zipfile.ZipFile(source, "w") as apk:
+                for dex in PATCHER.TARGETS.values():
+                    apk.writestr(dex, dex_fixture())
+            original = source.read_bytes()
+            output.write_bytes(b"previous-successful-build")
+
+            def broken_tool(command, **kwargs):
+                # Simulate a tool returning success while emitting the exact
+                # malformed envelope reported by ART. The build must reject it.
+                if "assemble" in command:
+                    Path(command[command.index("--output") + 1]).write_bytes(dex_fixture(41))
+
+            with mock.patch.object(PATCHER.subprocess, "run", side_effect=broken_tool), \
+                    mock.patch.object(PATCHER, "patch_sources"), \
+                    self.assertRaisesRegex(ValueError, "header size is 112, expected 120"):
+                PATCHER.build_apk(source, output, PATCH, "baksmali", "smali", root)
+            self.assertEqual(output.read_bytes(), b"previous-successful-build")
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(list(root.glob("miuicamera-*")), [])
+
+    def test_dex_039_build_selects_api_28_and_keeps_secondary_dex(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, output = root / "input.apk", root / "output.apk"
+            with zipfile.ZipFile(source, "w") as apk:
+                for dex in ("classes.dex", "classes2.dex", "classes5.dex"):
+                    apk.writestr(dex, dex_fixture())
+            commands = []
+
+            def tool(command, **kwargs):
+                commands.append(command)
+                if "assemble" in command:
+                    Path(command[command.index("--output") + 1]).write_bytes(dex_fixture())
+
+            with mock.patch.object(PATCHER.subprocess, "run", side_effect=tool), \
+                    mock.patch.object(PATCHER, "patch_sources"):
+                PATCHER.build_apk(source, output, PATCH, "baksmali", "smali", root)
+            self.assertEqual(len(commands), 4)
+            for command in commands:
+                self.assertEqual(command[command.index("--api") + 1], "28")
+            with zipfile.ZipFile(output) as apk:
+                self.assertEqual(PATCHER.validate_apk_dex(apk), {
+                    "classes.dex": 39, "classes2.dex": 39, "classes5.dex": 39})
 
 
 class PatchSafetyTest(unittest.TestCase):

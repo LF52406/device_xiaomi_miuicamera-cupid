@@ -72,6 +72,31 @@ generated-APK reference; generated makefiles otherwise restore the plain import.
 When updating the camera APK, review this patch against the new implementation.
 Unmatched or ambiguous smali context is an error, not an unpatched fallback.
 
+## DEX format and the startup regression
+
+The original patcher used `--api 35` for both smali tools. In the inspected AOSP
+google-smali this selects DEX **041**, while its writer still emits the old **112-byte**
+header. ART expects **120 bytes** for 041 and rejects it with
+`Header size is 112 but 120 was expected`. The later
+`ClassNotFoundException: com.android.camera.CameraAppImpl` is a consequence of
+the failed DEX load, even though the class is present.
+
+All seven DEX files in this prebuilt are **039**. The patcher now selects the
+assembler API from each original DEX version and requires the output to keep
+that version. For 039 it uses **API 28**, which consistently selects 039 in
+both legacy smali and AOSP google-smali. This is a bytecode-format setting;
+it does not change the manifest's min/target SDK or prevent references to
+newer Android methods such as `getCurrentWindowMetrics()`.
+
+Input DEX files, assembled replacements and all DEX files in the final APK are
+checked for version, header size, file size, byte order, SHA-1 and Adler-32.
+The final DEX entry set must also match the original. A malformed or unexpectedly
+upgraded DEX fails the build before replacing the output APK. This guard does
+not implement ART's full bytecode verification or support DEX 041 containers.
+
+References: [AOSP DEX header format](https://source.android.com/docs/core/runtime/dex-format#header-item)
+and [AOSP google-smali API mapping](https://android.googlesource.com/platform/external/google-smali/+/refs/heads/main/dexlib2/src/main/java/com/android/tools/smali/dexlib2/VersionMap.java).
+
 ## Verification
 
 Inspected input revisions:
@@ -82,7 +107,7 @@ Inspected input revisions:
 | Vendor camera tree, `avium-16.2` | `0e4f37a4cd5a1374c2d68ef5003d33a1c8ad4322` |
 | Assembled input APK, SHA-256 | `0d2c44a72ddb4f283ec8c02fbadee04ec9d836e188d852d2a68ef8cb4c4895f6` |
 
-The production host pipeline was run on that APK using smali/baksmali 2.3.3;
+Initial validation ran the host pipeline using smali/baksmali 2.3.3;
 the patched smali also assembled independently with apktool 2.12.1. ZIP content
 comparison found **11,873 unchanged entries**, two changed DEX files and only the
 two obsolete baseline-profile entries removed. Re-disassembly compared **13,612
@@ -90,7 +115,22 @@ classes**: only `y2.b` and `miuix.autodensity.f` changed after excluding generat
 disassembler comments.
 
 DEX assembly uses one worker to keep pool ordering reproducible. Two independent
-runs of the final production pipeline produced byte-for-byte identical APKs.
+runs of that initial pipeline produced byte-for-byte identical APKs. Those tests
+did not exercise the newer google-smali API-to-DEX mapping and missed the startup
+regression described above.
+
+The format fix was checked with **Google smali/baksmali 3.0.10**. A minimal
+`--api 35` assembly reproduced DEX 041 with a 112-byte header; the native
+`dexdump` from **Android SDK Build Tools 36** rejected it with the exact error
+reported on the phone. The same source assembled with API 28 passed.
+
+The full production pipeline then rebuilt the original camera APK with those
+new smali tools. Android's native `dexdump -c` accepted the resulting APK.
+All seven DEX files remained 039/112; all 13,612 class definitions in the two
+rebuilt DEX files were preserved, including `CameraAppImpl`. The same 11,873
+other ZIP entries were unchanged. The 18 host tests include rejecting malformed
+assembler output without overwriting a previous APK, DEX version drift, missing
+secondary DEX files and corrupt headers/digests.
 
 Run the patch/packaging failure-handling tests with:
 

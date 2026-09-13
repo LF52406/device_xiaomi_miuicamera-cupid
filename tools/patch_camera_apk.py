@@ -10,13 +10,16 @@ tree writes, apktool resource rebuild, or device-side commands are involved.
 
 import argparse
 import copy
+import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import zipfile
+import zlib
 
 
 TARGETS = {
@@ -25,6 +28,60 @@ TARGETS = {
 }
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 PROFILES = {"assets/dexopt/baseline.prof", "assets/dexopt/baseline.profm"}
+# Select the bytecode format from the prebuilt, not the ROM's Android API.
+# AOSP google-smali maps API 35 to DEX 041 but still writes a 112-byte header;
+# ART requires 120 bytes for 041. API 28 consistently emits the input's DEX 039
+# across old smali and google-smali. This does not change the APK's target SDK.
+DEX_APIS = {35: 23, 37: 25, 38: 27, 39: 28, 40: 34}
+DEX_NAME = re.compile(r"classes(?:[2-9]|[1-9][0-9]+)?\.dex")
+
+
+def validate_dex(data, name, expected_version=None):
+    """Check the standalone DEX envelope before ART sees the generated APK.
+
+    This is a format/integrity guard, not an Android bytecode verifier. DEX 041
+    containers require a different writer and are not supported by this patcher.
+    """
+    if len(data) < 112:
+        raise ValueError(f"{name}: truncated DEX header")
+    magic = re.fullmatch(rb"dex\n([0-9]{3})\x00", data[:8])
+    if magic is None:
+        raise ValueError(f"{name}: invalid DEX magic")
+    version = int(magic[1])
+    file_size, header_size, endian = struct.unpack_from("<III", data, 32)
+    required_header = 120 if version >= 41 else 112
+    if header_size != required_header:
+        raise ValueError(
+            f"{name}: DEX {version:03d} header size is {header_size}, "
+            f"expected {required_header}")
+    if version not in DEX_APIS:
+        raise ValueError(f"{name}: unsupported DEX version {version:03d}")
+    if expected_version is not None and version != expected_version:
+        raise ValueError(
+            f"{name}: DEX version changed from {expected_version:03d} "
+            f"to {version:03d}; check the smali toolchain")
+    if file_size != len(data):
+        raise ValueError(f"{name}: DEX file size does not match its header")
+    if endian != 0x12345678:
+        raise ValueError(f"{name}: unsupported DEX byte order")
+    if hashlib.sha1(data[32:]).digest() != data[12:32]:
+        raise ValueError(f"{name}: DEX SHA-1 mismatch")
+    if zlib.adler32(data[12:]) != struct.unpack_from("<I", data, 8)[0]:
+        raise ValueError(f"{name}: DEX Adler-32 mismatch")
+    return version
+
+
+def validate_apk_dex(apk, expected_versions=None):
+    versions = {}
+    for name in apk.namelist():
+        if DEX_NAME.fullmatch(name):
+            if name in versions:
+                raise ValueError(f"Duplicate DEX entry: {name}")
+            expected = None if expected_versions is None else expected_versions.get(name)
+            versions[name] = validate_dex(apk.read(name), name, expected)
+    if expected_versions is not None and versions != expected_versions:
+        raise ValueError("Rebuilt APK changed its DEX entries or versions")
+    return versions
 
 
 def parse_patch(text):
@@ -132,12 +189,14 @@ def build_apk(input_apk, output_apk, patch, baksmali, smali, work_dir):
     with tempfile.TemporaryDirectory(prefix="miuicamera-", dir=work_dir) as temp:
         root = Path(temp)
         with zipfile.ZipFile(input_apk) as src:
+            versions = validate_apk_dex(src)
             for target, dex in TARGETS.items():
                 dex_path = root / dex
                 dex_path.write_bytes(src.read(dex))
                 directory = root / target.split("/", 1)[0]
                 subprocess.run([
-                    baksmali, "-JXmx1g", "disassemble", "--api", "35",
+                    baksmali, "-JXmx1g", "disassemble", "--api",
+                    str(DEX_APIS[versions[dex]]),
                     "--use-locals", "--sequential-labels", "--jobs", "2",
                     "--output", str(directory), str(dex_path),
                 ], check=True)
@@ -147,15 +206,18 @@ def build_apk(input_apk, output_apk, patch, baksmali, smali, work_dir):
             rebuilt = root / ("patched-" + dex)
             # Serial interning avoids scheduling-dependent DEX pool ordering.
             subprocess.run([
-                smali, "-JXmx1g", "assemble", "--api", "35", "--jobs", "1",
+                smali, "-JXmx1g", "assemble", "--api",
+                str(DEX_APIS[versions[dex]]), "--jobs", "1",
                 "--output", str(rebuilt), str(root / target.split("/", 1)[0]),
             ], check=True)
+            validate_dex(rebuilt.read_bytes(), dex, versions[dex])
             replacements[dex] = rebuilt
         temporary_apk = root / "MiuiCamera.apk"
         write_apk(input_apk, temporary_apk, replacements)
         with zipfile.ZipFile(temporary_apk) as check:
             if check.testzip() is not None:
                 raise ValueError("Rebuilt APK failed ZIP verification")
+            validate_apk_dex(check, versions)
         os.replace(temporary_apk, output_apk)
 
 
